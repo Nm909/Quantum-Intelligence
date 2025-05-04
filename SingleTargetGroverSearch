@@ -1,0 +1,125 @@
+%matplotlib inline
+from qiskit_aer import AerSimulator
+import pandas as pd
+from qiskit import QuantumCircuit, transpile
+from qiskit.visualization import plot_histogram, circuit_drawer
+import matplotlib.pyplot as plt
+import random
+
+#  CONFIGURATION 
+n_qubits = 12
+dataset_size = 2**n_qubits  # 4096
+iterations = 56  
+
+#  Load dataset 
+df = pd.read_excel("Final_Quantum_Dataset_4096.xlsx")
+assert len(df) >= dataset_size, f"Dataset must have at least {dataset_size} records for {n_qubits}-qubit Grover."
+df = df.iloc[:dataset_size].reset_index(drop=True)
+
+#  Choose target to mark 
+malware_subset = [1, 2, 4, 6, 7]
+target_index = random.choice(malware_subset)
+target_bin = format(target_index, f'0{n_qubits}b')
+print(" Grover will try to detect index:", target_index, ":", target_bin)
+
+#  Oracle 
+def build_oracle(target_bin):
+    qc = QuantumCircuit(n_qubits)
+    for i, bit in enumerate(reversed(target_bin)):
+        if bit == '0':
+            qc.x(i)
+    qc.h(n_qubits - 1)
+    qc.mcx(list(range(n_qubits - 1)), n_qubits - 1)
+    qc.h(n_qubits - 1)
+    for i, bit in enumerate(reversed(target_bin)):
+        if bit == '0':
+            qc.x(i)
+    return qc
+
+#  Diffuser
+def diffuser(n):
+    qc = QuantumCircuit(n)
+    qc.h(range(n))
+    qc.x(range(n))
+    qc.h(n - 1)
+    qc.mcx(list(range(n - 1)), n - 1)
+    qc.h(n - 1)
+    qc.x(range(n))
+    qc.h(range(n))
+    return qc
+
+# Grover circuit 
+oracle = build_oracle(target_bin)
+diff = diffuser(n_qubits)
+
+qc = QuantumCircuit(n_qubits, n_qubits)
+qc.h(range(n_qubits))
+qc.barrier()  
+
+for _ in range(iterations):
+    qc.append(oracle.to_gate(), range(n_qubits))
+    qc.barrier()
+    qc.append(diff.to_gate(), range(n_qubits))
+    qc.barrier()
+
+qc.measure(range(n_qubits), range(n_qubits))
+
+# Visualize Oracle + Diffuser (one iteration) 
+grover_iteration = QuantumCircuit(n_qubits)
+grover_iteration.h(range(n_qubits))
+grover_iteration.barrier()  
+grover_iteration.compose(oracle, inplace=True)
+grover_iteration.barrier()  
+grover_iteration.compose(diff, inplace=True)
+grover_iteration.barrier()
+print("\nOne Grover iteration:")
+circuit_drawer(grover_iteration, output='mpl', fold=-1)
+
+
+# Full Grover Circuit Visualization with barriers
+qc_vis = QuantumCircuit(n_qubits, n_qubits)
+qc_vis.h(range(n_qubits))
+qc_vis.barrier()  # After initialization
+
+for _ in range(iterations):
+    qc_vis.append(oracle.to_gate(label="Oracle"), range(n_qubits))
+    qc_vis.barrier()  
+    qc_vis.append(diff.to_gate(label="Diffuser"), range(n_qubits))
+    qc_vis.barrier()
+
+qc_vis.measure(range(n_qubits), range(n_qubits))
+
+print("\nFull Grover circuit:")
+fig = circuit_drawer(qc_vis, output='mpl', fold=80, cregbundle=True, style={'fontsize': 7})
+fig.set_size_inches(60, 25)
+plt.tight_layout(pad=0.5)
+plt.show()
+
+
+# First Iteration Only
+first_iter = QuantumCircuit(n_qubits)
+first_iter.h(range(n_qubits))
+first_iter.barrier()
+first_iter.append(oracle.remove_final_measurements(inplace=False), range(n_qubits))
+first_iter.barrier()
+first_iter.append(diff.to_gate(label="Diffuser"), range(n_qubits))
+first_iter.barrier()
+print("\nFirst Grover Iteration:")
+circuit_drawer(first_iter, output='mpl', fold=-1)
+
+# Simulation
+simulator = AerSimulator()
+transpiled_qc = transpile(qc, simulator)
+result = simulator.run(transpiled_qc).result()
+counts = result.get_counts()
+
+# Visualization 
+plot_histogram(counts)
+plt.title("Grover's Algorithm (12-Qubit): Random Malware Hash Detection")
+plt.show()
+# Output result 
+print("\nTop detected index and hash:")
+for binary, count in sorted(counts.items(), key=lambda x: x[1], reverse=True)[:1]:
+    index = int(binary, 2)
+    hash_value = df.iloc[index]['hash']
+    print(f"Index {index}, Hash: {hash_value} (Count: {count})")
