@@ -1,0 +1,122 @@
+%matplotlib inline
+from qiskit_aer import AerSimulator
+import pandas as pd
+from qiskit import QuantumCircuit, transpile
+from qiskit.visualization import plot_histogram, circuit_drawer
+import matplotlib.pyplot as plt
+import math
+
+
+# Malware Indices
+n_qubits = 12
+dataset_size = 2**n_qubits  # 4096
+malware_subset = [1, 2, 4, 6, 7]  # 5 marked items
+iterations = int(round((math.pi / 4) * math.sqrt(dataset_size / len(malware_subset)))) 
+#  Load dataset 
+df = pd.read_excel("Final_Quantum_Dataset_4096.xlsx")
+assert len(df) >= dataset_size, f"Dataset must have at least {dataset_size} records for {n_qubits}-qubit Grover."
+df = df.iloc[:dataset_size].reset_index(drop=True)
+
+# Convert indices to binary 
+malware_binaries = [format(i, f'0{n_qubits}b') for i in malware_subset]
+print("Marked malware indices:", malware_subset)
+
+# STEP 1: Build Oracle for multiple targets
+def build_multi_oracle(target_binaries):
+    oracle = QuantumCircuit(n_qubits)
+    for target_bin in target_binaries:
+        temp = QuantumCircuit(n_qubits)
+        for i, bit in enumerate(reversed(target_bin)):
+            if bit == '0':
+                temp.x(i)
+        temp.h(n_qubits - 1)
+        temp.mcx(list(range(n_qubits - 1)), n_qubits - 1)
+        temp.h(n_qubits - 1)
+        for i, bit in enumerate(reversed(target_bin)):
+            if bit == '0':
+                temp.x(i)
+        oracle.barrier()
+        oracle.compose(temp, inplace=True)
+    return oracle
+
+# STEP 2: Diffuser 
+def diffuser(n):
+    qc = QuantumCircuit(n)
+    qc.h(range(n))
+    qc.x(range(n))
+    qc.h(n - 1)
+    qc.mcx(list(range(n - 1)), n - 1)
+    qc.h(n - 1)
+    qc.x(range(n))
+    qc.h(range(n))
+    return qc
+
+# STEP 3: Grover Circuit
+oracle = build_multi_oracle(malware_binaries)
+diff = diffuser(n_qubits)
+
+qc = QuantumCircuit(n_qubits, n_qubits)
+qc.h(range(n_qubits))
+qc.barrier()
+for _ in range(iterations):
+    qc.append(oracle.remove_final_measurements(inplace=False), range(n_qubits))
+    qc.barrier()
+    qc.append(diff.to_gate(label="Diffuser"), range(n_qubits))
+    qc.barrier()
+qc.measure(range(n_qubits), range(n_qubits))
+
+#  Visualize Oracle + Diffuser (one iteration) 
+grover_iteration = QuantumCircuit(n_qubits)
+grover_iteration.h(range(n_qubits))
+grover_iteration.compose(oracle, inplace=True)
+grover_iteration.barrier()
+grover_iteration.compose(diff, inplace=True)
+grover_iteration.barrier()
+print("\nOne Grover iteration:")
+circuit_drawer(grover_iteration, output='mpl', fold=-1)
+
+# Full Grover Circuit Visualization
+print("\nFull Grover circuit:")
+fig = circuit_drawer(qc, output='mpl', fold=80, cregbundle=True, style={'fontsize': 7})
+fig.set_size_inches(60, 25)
+plt.tight_layout(pad=0.5)
+plt.show()
+
+# First Iteration Only 
+first_iter = QuantumCircuit(n_qubits)
+first_iter.h(range(n_qubits))
+first_iter.barrier()
+first_iter.append(oracle.remove_final_measurements(inplace=False), range(n_qubits))
+first_iter.barrier()
+first_iter.append(diff.to_gate(label="Diffuser"), range(n_qubits))
+first_iter.barrier()
+print("\nFirst Grover Iteration:")
+circuit_drawer(first_iter, output='mpl', fold=-1)
+
+# Simulate
+simulator = AerSimulator()
+transpiled_qc = transpile(qc, simulator)
+result = simulator.run(transpiled_qc).result()
+counts = result.get_counts()
+# Plot Histogram for All 5 Malware Indices 
+expected_binaries = [format(i, f'0{n_qubits}b') for i in malware_subset]
+filtered_counts = {k: v for k, v in counts.items() if k in expected_binaries}
+plot_histogram(filtered_counts)
+plt.title("Grover Output: Detected Malware Hashes")
+plt.show()
+
+print("\nMalware Hashes Results:")
+top_index = None
+top_count = 0
+
+for bin_str in expected_binaries:
+    index = int(bin_str, 2)
+    count = counts.get(bin_str, 0)
+    hash_val = df.iloc[index]['hash']
+    print(f"Index{index:4d}, Hash: {hash_val}, Hits: {count}")
+    if count > top_count:
+        top_count = count
+        top_index = index
+
+top_hash = df.iloc[top_index]['hash']
+print(f"\nTop detected malware index:{top_index}, Hash: {top_hash} (Hits: {top_count})")
